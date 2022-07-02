@@ -1,0 +1,19 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="--service rollingUpdate --namespace monitoring --executorInterval 6000 --resourceName logstash" type="Application" factoryName="Application">
+    <classpathModifications>
+      <entry path="$PROJECT_DIR$/kc/src/main/resources" />
+    </classpathModifications>
+    <option name="MAIN_CLASS_NAME" value="com.openet.labs.monitoring.Main" />
+    <module name="kc" />
+    <option name="PROGRAM_PARAMETERS" value="--service rollingUpdate --namespace monitoring --executorInterval 6000 --resourceName logstash" />
+    <extension name="coverage">
+      <pattern>
+        <option name="PATTERN" value="com.openet.labs.monitoring.*" />
+        <option name="ENABLED" value="true" />
+      </pattern>
+    </extension>
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
