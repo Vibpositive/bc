@@ -7,8 +7,6 @@ import io.kubernetes.client.openapi.Configuration;
 import io.kubernetes.client.openapi.apis.AppsV1Api;
 import io.kubernetes.client.openapi.apis.CoreV1Api;
 import io.kubernetes.client.openapi.models.V1Pod;
-import io.kubernetes.client.openapi.models.V1PodList;
-import io.kubernetes.client.openapi.models.V1StatefulSet;
 import io.kubernetes.client.openapi.models.V1StatefulSetList;
 import io.kubernetes.client.util.Config;
 import io.kubernetes.client.util.Watch;
@@ -17,29 +15,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 public class WaitRollingUpdate extends ClientFactory implements Resource{
 
     CoreV1Api api;
     AppsV1Api appsV1Api;
 
-    V1StatefulSetList v1StatefulSetList = new V1StatefulSetList();
     String namespace;
     String resourceName;
-    AtomicInteger v1PodStackSize = new AtomicInteger();
-    HashMap<String, V1Pod> v1PodStackToBeDeleted = new HashMap<>();
-    HashMap<String, V1Pod> v1PodStackToBeRecreated = new HashMap<>();
-    HashMap<String, V1Pod> v1PodStackToBeRestored = new HashMap<>();
-    Watch<V1Pod> watch;
     ApiClient client;
     OkHttpClient httpClient;
+
+
+    private Integer completionsQuantity = -1;
+    private int currentCompletions;
 
     int sleepTimeout;
 
@@ -47,122 +40,128 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
 
     public Job job = () -> {
         try {
-            getStatefulSetInfo();
-            logPodList();
-            run();
-        } catch (ApiException | InterruptedException | IOException e){
+            if(!isCompletionQuantity()){
+                statefulSetInfoExecutor();
+            }else{
+                run();
+            }
+        } catch (Throwable e){
             throw new RuntimeException(e);
         }
         logger.info("Sleeping for {}ms", sleepTimeout);
     };
 
-    private void logPodList() throws ApiException {
-        while (v1PodStackSize.get() > 0){
-
-            V1PodList v1PodList = api.listNamespacedPod(namespace,
-                    null,
-                    null,
-                    null,
-                    null,
-                    "app=monitoring-logstash",
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
-
-            logger.info("Pod count: {}", v1PodList.getItems().size());
-            v1PodList.getItems()
-                    .forEach(v1Pod -> {
-                        logger.info(
-                                "Pod: {} startTime: {} Ready: {} Phase: {} ",
-                                v1Pod.getMetadata().getName(),
-                                v1Pod.getStatus().getStartTime(),
-                                v1Pod.getStatus().getContainerStatuses().get(0).getReady(),
-                                v1Pod.getStatus().getPhase()
-                        );
-                        v1PodStackToBeDeleted.put(v1Pod.getMetadata().getName(), v1Pod);
-                        v1PodStackSize.decrementAndGet();
-                    });
-        }
+    private boolean isCompletionQuantity() {
+        return completionsQuantity > 0;
     }
 
-    private void run() throws IOException {
+    private void run() {
+        logger.debug("run");
+//        TODO need to implement a watch for stateful set, as soon as stateful set changes, we start watching for
+//        TODO pods with Watch<V1Pod>
+        try (Watch<V1Pod> watch = Watch.createWatch(
+                client,
+                api.listNamespacedPodCall(
+                        namespace,
+                        null,
+                        null,
+                        null,
+                        null,
+                        "app=monitoring-logstash",
+                        null,
+                        null,
+                        null,
+                        null,
+                        Boolean.TRUE,
+                        null),
+                new TypeToken<Watch.Response<V1Pod>>() {}.getType())
+        ){
+            for (Watch.Response<V1Pod> ignored : watch) {
 
-        try {
-            watch = Watch.createWatch(
-                    client,
-                    api.listNamespacedPodCall("monitoring", null, null, null, null, null, 100, null, null, null, Boolean.TRUE, null),
-                    new TypeToken<Watch.Response<V1Pod>>() {}.getType());
-        } catch (ApiException e) {
-            throw new RuntimeException(e);
-        }
-        try {
-            for (Watch.Response<V1Pod> item : watch) {
-                String currentV1PodName = item.object.getMetadata().getName();
-                if(item.type.equals("DELETED") && v1PodStackToBeDeleted.size() > 0){
-                    v1PodStackToBeRecreated.put(currentV1PodName, v1PodStackToBeDeleted.remove(currentV1PodName));
-                    logger.info("{} {}", currentV1PodName, item.type);
-                }
-                if(item.type.equals("ADDED") && v1PodStackToBeRecreated.size() > 0){
-                    v1PodStackToBeRestored.put(currentV1PodName, v1PodStackToBeRecreated.remove(currentV1PodName));
-                    logger.info("{} {}", currentV1PodName, item.type);
-                }
-                if(item.type.equals("MODIFIED") && item.object.getStatus().getPhase().equals("Running") &&
-                        v1PodStackToBeRestored.size() > 0 && !(v1PodStackToBeRestored.get(currentV1PodName) == null)
-                ){
-                    v1PodStackToBeRestored.remove(currentV1PodName);
-                    logger.info("{} {}", currentV1PodName, "RESTORED");
-                }
-                if( v1PodStackToBeDeleted.size() == 0 && v1PodStackToBeRecreated.size() == 0 &&
-                        v1PodStackToBeRestored.size() == 0 ){
-                    System.exit(0);
-                }
+                Objects.requireNonNull(ignored.object.getMetadata(), "V1Pod metadata must be available");
+
+                logger.info("Pod [{}] State change [{}]",
+                        ignored.object.getMetadata().getName(), ignored.type);
+
+                getStatefulset()
+                    .getItems()
+                    .forEach(v1StatefulSet -> {
+                        Objects.requireNonNull(v1StatefulSet.getMetadata());
+                        Objects.requireNonNull(v1StatefulSet.getStatus());
+
+                        Integer updatedReplicas
+                                = v1StatefulSet.getStatus().getUpdatedReplicas();
+
+                        Long generation = v1StatefulSet.getMetadata().getGeneration();
+                        Objects.requireNonNull(generation);
+
+                        currentCompletions = updatedReplicas == null ? 0 : updatedReplicas;
+                        Objects.requireNonNull(completionsQuantity);
+
+                        logger.debug("Statefulset [{}] CurrentCompletions [{}] completionsQuantity [{}] CurrentGeneration [{}]",
+                                v1StatefulSet.getMetadata().getName(), currentCompletions, completionsQuantity, generation);
+
+                        if(currentCompletions == completionsQuantity && generation == 1L){
+                            currentCompletions = 0;
+                        }
+                        if(currentCompletions == completionsQuantity && generation == 2L){
+                            logger.info("Would exit");
+//                            System.exit(0);
+                        }
+                    });
             }
         }catch (Exception e){
-            logger.error(String.valueOf(e));
+            logger.error("{}", (Object) e.getStackTrace());
+            e.printStackTrace();
+//            TODO when this happend, app is not exiting
             throw new RuntimeException(e);
-        } finally {
-            watch.close();
         }
     }
 
-    private void getStatefulSetInfo() throws ApiException, InterruptedException {
+
+    private void statefulSetInfoExecutor() {
         logger.debug("getStatefulSetInfo");
-        while (v1StatefulSetList.getItems().size() == 0) {
-            v1StatefulSetList = appsV1Api.listNamespacedStatefulSet(
-                    namespace,
-                    "true",
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
-
-            String resourceName = "logstash";
-            List<V1StatefulSet> filteredList = v1StatefulSetList.getItems()
-                    .stream()
-                    .filter(v1StatefulSet -> Objects.equals(
-                            Objects.requireNonNull(v1StatefulSet.getMetadata()).getName().toLowerCase(Locale.ROOT),
-                            resourceName.toLowerCase(Locale.ROOT)))
-                    .collect(Collectors.toList());
-
-            filteredList.forEach(v1StatefulSet -> {
-                logger.info(
-                        "StatefulSet.status.availableReplicas: {} StatefulSet.status.currentReplicas: {} StatefulSet.status.readyReplicas: {} StatefulSet.status.replicas {}: ",
-                        v1StatefulSet.getStatus().getAvailableReplicas(),
-                        v1StatefulSet.getStatus().getCurrentReplicas(),
-                        v1StatefulSet.getStatus().getReadyReplicas(),
-                        v1StatefulSet.getStatus().getReplicas()
-                );
-                v1PodStackSize.set(v1StatefulSet.getStatus().getAvailableReplicas());
-            });
-            Thread.sleep(sleepTimeout);
+        if(isCompletionQuantity()){
+            return;
         }
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        executor.scheduleAtFixedRate(() -> {
+            try {
+                if(getStatefulset().getItems().size() > 0){
+                    completionsQuantity = getStatefulset()
+                            .getItems()
+                            .stream().findFirst()
+                            .map(v1StatefulSet -> {
+                                Objects.requireNonNull(v1StatefulSet.getSpec());
+                                Objects.requireNonNull(v1StatefulSet.getSpec().getReplicas());
+
+                                return v1StatefulSet.getSpec().getReplicas();
+                            }).get();
+                    logger.debug("setting completionsQuantity to {}", completionsQuantity);
+                    executor.shutdown();
+                    logger.debug("shutting down executor");
+                }
+            } catch (ApiException e) {
+//                TODO test this
+                throw new RuntimeException(e);
+            }
+        }, 0, 500, TimeUnit.MILLISECONDS);
+    }
+
+    private V1StatefulSetList getStatefulset() throws ApiException {
+
+        return appsV1Api.listNamespacedStatefulSet(
+                namespace,
+                null,
+                null,
+                null,
+                null,
+                "app=monitoring-logstash",
+                null,
+                null,
+                null,
+                null,
+                null);
     }
 
     public Job getJob() {
@@ -191,6 +190,7 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
             this.sleepTimeout = sleepTimeout;
             return this;
         } catch (IOException e) {
+//                TODO test this
             throw new RuntimeException(e);
         }
     }

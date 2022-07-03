@@ -7,7 +7,6 @@ import io.kubernetes.client.openapi.Configuration;
 import io.kubernetes.client.openapi.apis.AppsV1Api;
 import io.kubernetes.client.openapi.apis.CoreV1Api;
 import io.kubernetes.client.openapi.models.V1Pod;
-import io.kubernetes.client.openapi.models.V1PodList;
 import io.kubernetes.client.openapi.models.V1StatefulSet;
 import io.kubernetes.client.openapi.models.V1StatefulSetList;
 import io.kubernetes.client.util.Config;
@@ -20,7 +19,9 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -46,7 +47,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
     public Job job = () -> {
         try {
             setStatefulSetInfo();
-            logPodList();
+//            logPodList();
             run();
         } catch (ApiException | InterruptedException | IOException e){
             throw new RuntimeException(e);
@@ -54,42 +55,43 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
         logger.info("Sleeping for {}ms", sleepTimeout);
     };
 
-    private void logPodList() throws ApiException {
-        while (v1PodListSize.get() > 0){
-
-            V1PodList v1PodList = api.listNamespacedPod(namespace,
-                    null,
-                    null,
-                    null,
-                    null,
-                    "app=monitoring-logstash",
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
-
-            logger.info("Pod count: {}", v1PodList.getItems().size());
-            v1PodList.getItems()
-                    .forEach(v1Pod -> {
-                        Objects.requireNonNull(v1Pod.getMetadata());
-                        Objects.requireNonNull(v1Pod.getStatus());
-                        logger.debug(
-                                "Pod: {} startTime: {} Phase: {} ",
-                                v1Pod.getMetadata().getName(),
-                                v1Pod.getStatus().getStartTime(),
-                                v1Pod.getStatus().getPhase()
-                        );
-                        v1PodListSize.decrementAndGet();
-                    });
-        }
-    }
-
+//    private void logPodList() throws ApiException {
+//        while (v1PodListSize.get() > 0){
+//
+//            V1PodList v1PodList = api.listNamespacedPod(namespace,
+//                    null,
+//                    null,
+//                    null,
+//                    null,
+//                    "app=monitoring-logstash",
+//                    null,
+//                    null,
+//                    null,
+//                    null,
+//                    null);
+//
+//            logger.info("Pod count: {}", v1PodList.getItems().size());
+//            v1PodList.getItems()
+//                    .forEach(v1Pod -> {
+//                        Objects.requireNonNull(v1Pod.getMetadata());
+//                        Objects.requireNonNull(v1Pod.getStatus());
+//                        logger.debug(
+//                                "Pod: {} startTime: {} Phase: {} ",
+//                                v1Pod.getMetadata().getName(),
+//                                v1Pod.getStatus().getStartTime(),
+//                                v1Pod.getStatus().getPhase()
+//                        );
+//                        v1PodListSize.decrementAndGet();
+//                    });
+//        }
+//    }
+//
     private void run() throws IOException, ApiException {
-        while (true) {
+//        while (true) {
             try (Watch<V1Pod> watch = Watch.createWatch(
                     client,
-                    api.listNamespacedPodCall("monitoring",
+                    api.listNamespacedPodCall(
+                            namespace,
                             null,
                             null,
                             null,
@@ -104,6 +106,11 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
                     new TypeToken<Watch.Response<V1Pod>>() {}.getType())
             ){
                 for (Watch.Response<V1Pod> ignored : watch) {
+
+                    Objects.requireNonNull(ignored.object.getMetadata(), "V1Pod metadata must be available");
+
+//                    logger.info("Pod [{}] State change [{}] Status [{}] aaa [{}]",
+//                            ignored.object.getMetadata().getName(), ignored.type, ignored.object.getStatus(), ignored.object.getMetadata());
 
                     appsV1Api.listNamespacedStatefulSet(
                                     namespace,
@@ -130,7 +137,9 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
                                 Objects.requireNonNull(generation);
 
                                 currentCompletions = updatedReplicas == null ? 0 : updatedReplicas;
-                                logger.debug("CurrentCompletions {} CurrentGeneration {}", currentCompletions, generation);
+                                logger.debug("Statefulset [{}] CurrentCompletions [{}] CurrentGeneration [{}]",
+                                        v1StatefulSet.getMetadata().getName(), currentCompletions, generation);
+                                logger.info("statefulset {}", v1StatefulSet.getSpec().getReplicas());
 
                                 if(currentCompletions == completionsQuantity && generation == 2L){
                                     System.exit(0);
@@ -143,7 +152,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
             } finally {
                 watch.close();
             }
-        }
+//        }
     }
 
     private void setStatefulSetInfo() throws ApiException, InterruptedException {
@@ -166,7 +175,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
 
         v1StatefulSetList = appsV1Api.listNamespacedStatefulSet(
                 namespace,
-                "true",
+                null,
                 null,
                 null,
                 null,
