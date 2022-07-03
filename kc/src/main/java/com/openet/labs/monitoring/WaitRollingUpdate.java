@@ -43,10 +43,10 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
 
     public Job job = () -> {
         try {
-            if(!isCompletionQuantity()){
-                setCompletionsQuantity();
-            }else{
+            if(isCompletionQuantity()){
                 run();
+            }else{
+                setCompletionsQuantity();
             }
         } catch (Throwable e){
             throw new RuntimeException(e);
@@ -104,7 +104,7 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
         }catch (Exception e){
             logger.error("{}", (Object) e.getStackTrace());
             e.printStackTrace();
-//            TODO when this happend, app is not exiting
+//            TODO when this happened, app is not exiting
             throw new RuntimeException(e);
         }
     }
@@ -112,9 +112,6 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
     private void extracted(V1StatefulSet v1StatefulSet) {
         Objects.requireNonNull(v1StatefulSet.getMetadata());
         Objects.requireNonNull(v1StatefulSet.getStatus());
-
-//        Integer updatedReplicas
-//                = v1StatefulSet.getStatus().getUpdatedReplicas();
 
         generation = v1StatefulSet.getMetadata().getGeneration();
         Objects.requireNonNull(generation);
@@ -135,9 +132,6 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
     private void setCompletionsQuantity() {
         logger.debug("getStatefulSetInfo");
 
-//        TODO:
-//        CompletableFuture<Integer> future
-//                = CompletableFuture.supplyAsync(() -> -1);
         while(!isCompletionQuantity()){
             try {
                 if(getStatefulset().getItems().size() > 0){
