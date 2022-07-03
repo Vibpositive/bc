@@ -11,27 +11,6 @@
     <modules>
         <module>kc</module>
     </modules>
-    <dependencies>
-        <dependency>
-            <groupId>com.google.code.gson</groupId>
-            <artifactId>gson</artifactId>
-            <version>2.9.0</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.kubernetes</groupId>
-            <artifactId>client-java-api</artifactId>
-            <version>15.0.1</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.kubernetes</groupId>
-            <artifactId>client-java</artifactId>
-            <version>15.0.1</version>
-            <scope>compile</scope>
-        </dependency>
-    </dependencies>
-
     <properties>
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>

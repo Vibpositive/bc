@@ -8,6 +8,8 @@ kind: StatefulSet
 metadata:
   name: logstash
   namespace: monitoring
+  labels:
+    app: monitoring-logstash
 spec:
   serviceName: "logstash"
   replicas: 3
@@ -21,7 +23,8 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: k8s.gcr.io/nginx-slim:0.8
+          image: ubuntu:22.04
+          command: ["sleep","3600"]
           ports:
             - containerPort: 80
               name: web

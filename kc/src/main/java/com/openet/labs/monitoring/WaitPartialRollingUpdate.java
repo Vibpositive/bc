@@ -17,11 +17,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -33,10 +32,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
     V1StatefulSetList v1StatefulSetList = new V1StatefulSetList();
     String namespace;
     String resourceName;
-    AtomicInteger v1PodStackSize = new AtomicInteger();
-    HashMap<String, V1Pod> v1DeletedPods = new HashMap<>();
-    HashMap<String, V1Pod> v1PodsToBeRecreated = new HashMap<>();
-    HashMap<String, V1Pod> v1PodsToBeRestored = new HashMap<>();
+    AtomicInteger v1PodListSize = new AtomicInteger();
     Watch<V1Pod> watch;
     ApiClient client;
     OkHttpClient httpClient;
@@ -49,7 +45,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
 
     public Job job = () -> {
         try {
-            getStatefulSetInfo();
+            setStatefulSetInfo();
             logPodList();
             run();
         } catch (ApiException | InterruptedException | IOException e){
@@ -59,7 +55,7 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
     };
 
     private void logPodList() throws ApiException {
-        while (v1PodStackSize.get() > 0){
+        while (v1PodListSize.get() > 0){
 
             V1PodList v1PodList = api.listNamespacedPod(namespace,
                     null,
@@ -76,114 +72,134 @@ public class WaitPartialRollingUpdate extends ClientFactory implements Resource{
             logger.info("Pod count: {}", v1PodList.getItems().size());
             v1PodList.getItems()
                     .forEach(v1Pod -> {
-                        logger.info(
-                                "Pod: {} startTime: {} Ready: {} Phase: {} ",
+                        Objects.requireNonNull(v1Pod.getMetadata());
+                        Objects.requireNonNull(v1Pod.getStatus());
+                        logger.debug(
+                                "Pod: {} startTime: {} Phase: {} ",
                                 v1Pod.getMetadata().getName(),
                                 v1Pod.getStatus().getStartTime(),
-                                v1Pod.getStatus().getContainerStatuses().get(0).getReady(),
                                 v1Pod.getStatus().getPhase()
                         );
-//                        v1DeletedPod.put(v1Pod.getMetadata().getName(), v1Pod);
-//                        v1PodsToBeRestored.put(v1Pod.getMetadata().getName(), v1Pod);
-//                        v1PodsToBeRecreated.put(v1Pod.getMetadata().getName(), v1Pod);
-                        v1PodStackSize.decrementAndGet();
+                        v1PodListSize.decrementAndGet();
                     });
         }
     }
 
     private void run() throws IOException, ApiException {
-        String resourceVersion = null;
-        try {
-            watch = Watch.createWatch(
+        while (true) {
+            try (Watch<V1Pod> watch = Watch.createWatch(
                     client,
-                    api.listNamespacedPodCall("monitoring", null, null, null, null, null, 100, null, null, null, Boolean.TRUE, null),
-                    new TypeToken<Watch.Response<V1Pod>>() {}.getType());
-        } catch (ApiException e) {
-            throw new RuntimeException(e);
-        }
-        try {
-            for (Watch.Response<V1Pod> item : watch) {
-                String currentV1PodName = item.object.getMetadata().getName();
+                    api.listNamespacedPodCall("monitoring",
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            100,
+                            null,
+                            null,
+                            null,
+                            Boolean.TRUE,
+                            null),
+                    new TypeToken<Watch.Response<V1Pod>>() {}.getType())
+            ){
+                for (Watch.Response<V1Pod> ignored : watch) {
 
-                logger.info("xxxx {} yyyy {}", currentV1PodName, item.object.getStatus().getPhase());
+                    appsV1Api.listNamespacedStatefulSet(
+                                    namespace,
+                                    "true",
+                                    null,
+                                    null,
+                                    null,
+                                    "app=monitoring-logstash",
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null)
+                            .getItems()
+                            .forEach(v1StatefulSet -> {
+                                Objects.requireNonNull(v1StatefulSet.getMetadata());
+                                Objects.requireNonNull(v1StatefulSet.getStatus());
 
-                if(item.type.equals("DELETED") && !v1DeletedPods.containsKey(currentV1PodName)){
-                    v1DeletedPods.put(currentV1PodName, item.object);
-                    logger.info("{} {}", currentV1PodName, item.type);
-                }
-                if( item.type.equals("ADDED") && !v1PodsToBeRecreated.containsKey(currentV1PodName)&&
-                    v1DeletedPods.containsKey(currentV1PodName)){
+                                Integer updatedReplicas
+                                        = v1StatefulSet.getStatus().getUpdatedReplicas();
 
-                    v1PodsToBeRecreated.put(currentV1PodName, item.object);
-                    logger.info("{} {}", currentV1PodName, item.type);
-                }
-                if(
-                    item.type.equals("MODIFIED") && item.object.getStatus().getPhase().equals("Running") &&
-                    !v1PodsToBeRestored.containsKey(currentV1PodName) &&
-                    v1DeletedPods.containsKey(currentV1PodName)
-                ){
+                                Long generation = v1StatefulSet.getMetadata().getGeneration();
 
-                    v1PodsToBeRestored.put(currentV1PodName, item.object);
-                    logger.info("{} {}", currentV1PodName, "RESTORED");
-                }
-                if (v1DeletedPods.size() == v1PodsToBeRecreated.size() && v1DeletedPods.size() == v1PodsToBeRestored.size() &&
-                        v1DeletedPods.size() > 0 &&
-                        v1DeletedPods.containsKey(currentV1PodName) &&
-                        v1PodsToBeRecreated.containsKey(currentV1PodName) &&
-                        v1PodsToBeRestored.containsKey(currentV1PodName)
-                ){
-                    currentCompletions++;
-                    logger.debug("CurrentCompletions {}", currentCompletions);
-                }
+                                Objects.requireNonNull(generation);
 
-                if(currentCompletions == completionsQuantity){
-                    System.exit(0);
+                                currentCompletions = updatedReplicas == null ? 0 : updatedReplicas;
+                                logger.debug("CurrentCompletions {} CurrentGeneration {}", currentCompletions, generation);
+
+                                if(currentCompletions == completionsQuantity && generation == 2L){
+                                    System.exit(0);
+                                }
+                            });
                 }
+            }catch (Exception e){
+                logger.error(String.valueOf(e));
+                throw new RuntimeException(e);
+            } finally {
+                watch.close();
             }
-        }catch (Exception e){
-            logger.error(String.valueOf(e));
-            throw new RuntimeException(e);
-        } finally {
-            watch.close();
         }
     }
 
-    private void getStatefulSetInfo() throws ApiException, InterruptedException {
+    private void setStatefulSetInfo() throws ApiException, InterruptedException {
         logger.debug("getStatefulSetInfo");
-        while (v1StatefulSetList.getItems().size() == 0) {
-            v1StatefulSetList = appsV1Api.listNamespacedStatefulSet(
-                    namespace,
-                    "true",
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
 
-            String resourceName = "logstash";
-            List<V1StatefulSet> filteredList = v1StatefulSetList.getItems()
-                    .stream()
-                    .filter(v1StatefulSet -> Objects.equals(
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        executor.scheduleAtFixedRate(() -> {
+            try {
+                execute();
+                if(v1StatefulSetList.getItems().size() > 0){
+                    executor.shutdown();
+                }
+            } catch (ApiException e) {
+                throw new RuntimeException(e);
+            }
+        }, 0, 500, TimeUnit.MILLISECONDS);
+    }
+
+    private void execute() throws ApiException {
+
+        v1StatefulSetList = appsV1Api.listNamespacedStatefulSet(
+                namespace,
+                "true",
+                null,
+                null,
+                null,
+                "app=monitoring-logstash",
+                null,
+                null,
+                null,
+                null,
+                null);
+
+        String resourceName = "logstash";
+        List<V1StatefulSet> filteredList = v1StatefulSetList.getItems()
+                .stream()
+                .filter(v1StatefulSet -> {
+                    Objects.requireNonNull(v1StatefulSet.getMetadata());
+                    Objects.requireNonNull(v1StatefulSet.getMetadata().getName());
+                    return Objects.equals(
                             Objects.requireNonNull(v1StatefulSet.getMetadata()).getName().toLowerCase(Locale.ROOT),
-                            resourceName.toLowerCase(Locale.ROOT)))
-                    .collect(Collectors.toList());
+                            resourceName.toLowerCase(Locale.ROOT));
+                })
+                .collect(Collectors.toList());
 
-            filteredList.forEach(v1StatefulSet -> {
-                logger.info(
-                        "StatefulSet.status.availableReplicas: {} StatefulSet.status.currentReplicas: {} StatefulSet.status.readyReplicas: {} StatefulSet.status.replicas {}: ",
-                        v1StatefulSet.getStatus().getAvailableReplicas(),
-                        v1StatefulSet.getStatus().getCurrentReplicas(),
-                        v1StatefulSet.getStatus().getReadyReplicas(),
-                        v1StatefulSet.getStatus().getReplicas()
-                );
-                v1PodStackSize.set(v1StatefulSet.getStatus().getAvailableReplicas());
-            });
-            Thread.sleep(sleepTimeout);
-        }
+        filteredList.forEach(v1StatefulSet -> {
+            Objects.requireNonNull(v1StatefulSet.getStatus());
+            logger.info(
+                    "StatefulSet.status.availableReplicas: {} StatefulSet.status.currentReplicas: {} StatefulSet.status.readyReplicas: {} StatefulSet.status.replicas {}: ",
+                    v1StatefulSet.getStatus().getAvailableReplicas(),
+                    v1StatefulSet.getStatus().getCurrentReplicas(),
+                    v1StatefulSet.getStatus().getReadyReplicas(),
+                    v1StatefulSet.getStatus().getReplicas()
+            );
+            v1PodListSize.set(v1StatefulSet.getStatus().getAvailableReplicas());
+        });
     }
 
     public Job getJob() {
