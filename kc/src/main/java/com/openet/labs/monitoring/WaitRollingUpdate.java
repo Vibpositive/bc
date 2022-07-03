@@ -6,7 +6,9 @@ import io.kubernetes.client.openapi.ApiException;
 import io.kubernetes.client.openapi.Configuration;
 import io.kubernetes.client.openapi.apis.AppsV1Api;
 import io.kubernetes.client.openapi.apis.CoreV1Api;
+import io.kubernetes.client.openapi.models.V1ObjectMeta;
 import io.kubernetes.client.openapi.models.V1Pod;
+import io.kubernetes.client.openapi.models.V1StatefulSet;
 import io.kubernetes.client.openapi.models.V1StatefulSetList;
 import io.kubernetes.client.util.Config;
 import io.kubernetes.client.util.Watch;
@@ -16,9 +18,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Objects;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 public class WaitRollingUpdate extends ClientFactory implements Resource{
 
@@ -31,8 +33,9 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
     OkHttpClient httpClient;
 
 
-    private Integer completionsQuantity = -1;
+    private Integer completionsQuantity = 0;
     private int currentCompletions;
+    Long generation;
 
     int sleepTimeout;
 
@@ -41,7 +44,7 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
     public Job job = () -> {
         try {
             if(!isCompletionQuantity()){
-                statefulSetInfoExecutor();
+                setCompletionsQuantity();
             }else{
                 run();
             }
@@ -55,10 +58,9 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
         return completionsQuantity > 0;
     }
 
-    private void run() {
+    private void run() throws Throwable {
         logger.debug("run");
-//        TODO need to implement a watch for stateful set, as soon as stateful set changes, we start watching for
-//        TODO pods with Watch<V1Pod>
+
         try (Watch<V1Pod> watch = Watch.createWatch(
                 client,
                 api.listNamespacedPodCall(
@@ -80,35 +82,24 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
 
                 Objects.requireNonNull(ignored.object.getMetadata(), "V1Pod metadata must be available");
 
-                logger.info("Pod [{}] State change [{}]",
+                logger.debug("Pod [{}] State change [{}]",
                         ignored.object.getMetadata().getName(), ignored.type);
 
-                getStatefulset()
-                    .getItems()
-                    .forEach(v1StatefulSet -> {
-                        Objects.requireNonNull(v1StatefulSet.getMetadata());
-                        Objects.requireNonNull(v1StatefulSet.getStatus());
 
-                        Integer updatedReplicas
-                                = v1StatefulSet.getStatus().getUpdatedReplicas();
+                Optional<V1StatefulSet> first = getStatefulset()
+                        .getItems()
+                        .stream().filter(v1StatefulSet -> {
+                            V1ObjectMeta meta = v1StatefulSet.getMetadata();
+                            Objects.requireNonNull(meta);
+                            Long generation = meta.getGeneration();
+                            Objects.requireNonNull(generation);
 
-                        Long generation = v1StatefulSet.getMetadata().getGeneration();
-                        Objects.requireNonNull(generation);
-
-                        currentCompletions = updatedReplicas == null ? 0 : updatedReplicas;
-                        Objects.requireNonNull(completionsQuantity);
-
-                        logger.debug("Statefulset [{}] CurrentCompletions [{}] completionsQuantity [{}] CurrentGeneration [{}]",
-                                v1StatefulSet.getMetadata().getName(), currentCompletions, completionsQuantity, generation);
-
-                        if(currentCompletions == completionsQuantity && generation == 1L){
-                            currentCompletions = 0;
-                        }
-                        if(currentCompletions == completionsQuantity && generation == 2L){
-                            logger.info("Would exit");
-//                            System.exit(0);
-                        }
-                    });
+                            return generation > 1;
+                        })
+                        .findFirst();
+                if(first.isPresent() && ignored.type.equals("ADDED")){
+                    extracted(first.orElseThrow((Supplier<Throwable>) () -> new RuntimeException("TODO:")));
+                }
             }
         }catch (Exception e){
             logger.error("{}", (Object) e.getStackTrace());
@@ -118,14 +109,36 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
         }
     }
 
+    private void extracted(V1StatefulSet v1StatefulSet) {
+        Objects.requireNonNull(v1StatefulSet.getMetadata());
+        Objects.requireNonNull(v1StatefulSet.getStatus());
 
-    private void statefulSetInfoExecutor() {
-        logger.debug("getStatefulSetInfo");
-        if(isCompletionQuantity()){
-            return;
+//        Integer updatedReplicas
+//                = v1StatefulSet.getStatus().getUpdatedReplicas();
+
+        generation = v1StatefulSet.getMetadata().getGeneration();
+        Objects.requireNonNull(generation);
+
+        currentCompletions++;
+        Objects.requireNonNull(completionsQuantity);
+
+        logger.debug("Statefulset [{}] CurrentCompletions [{}] completionsQuantity [{}] CurrentGeneration [{}]",
+                v1StatefulSet.getMetadata().getName(), currentCompletions, completionsQuantity, generation);
+
+//        TODO generation needs to be set via arguments
+        if(currentCompletions == completionsQuantity && generation == 2L){
+            System.exit(0);
         }
-        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
-        executor.scheduleAtFixedRate(() -> {
+    }
+
+
+    private void setCompletionsQuantity() {
+        logger.debug("getStatefulSetInfo");
+
+//        TODO:
+//        CompletableFuture<Integer> future
+//                = CompletableFuture.supplyAsync(() -> -1);
+        while(!isCompletionQuantity()){
             try {
                 if(getStatefulset().getItems().size() > 0){
                     completionsQuantity = getStatefulset()
@@ -138,14 +151,16 @@ public class WaitRollingUpdate extends ClientFactory implements Resource{
                                 return v1StatefulSet.getSpec().getReplicas();
                             }).get();
                     logger.debug("setting completionsQuantity to {}", completionsQuantity);
-                    executor.shutdown();
+                    logger.debug(Thread.currentThread().getName());
                     logger.debug("shutting down executor");
                 }
-            } catch (ApiException e) {
+                //noinspection BusyWait
+                Thread.sleep(500);
+            } catch (ApiException | InterruptedException e) {
 //                TODO test this
                 throw new RuntimeException(e);
             }
-        }, 0, 500, TimeUnit.MILLISECONDS);
+        }
     }
 
     private V1StatefulSetList getStatefulset() throws ApiException {
